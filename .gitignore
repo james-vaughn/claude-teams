@@ -1,2 +1,5 @@
 bin/
 .team-token
+*.db
+*.db-wal
+*.db-shm

@@ -19,12 +19,16 @@ const (
 	maxTextRunes    = 16000
 	maxNameRunes    = 64
 	maxKindRunes    = 32
+	maxVersionRunes = 32
 	defaultLimit    = 100
 	maxLimit        = 500
 	defaultKind     = "update"
 )
 
-var teamNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var (
+	sessionIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	versionPattern   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$`)
+)
 
 type Handler struct {
 	store *Store
@@ -33,10 +37,17 @@ type Handler struct {
 }
 
 func NewHandler(store *Store, token string) *Handler {
+	if token == "" {
+		panic("relay: token must not be empty")
+	}
 	h := &Handler{store: store, token: token, mux: http.NewServeMux()}
 	h.mux.HandleFunc("GET /healthz", h.health)
-	h.mux.HandleFunc("POST /teams/{team}/messages", h.requireToken(h.publish))
-	h.mux.HandleFunc("GET /teams/{team}/messages", h.requireToken(h.messages))
+	h.mux.HandleFunc("POST /sessions", h.requireClient(h.createSession))
+	h.mux.HandleFunc("GET /sessions/{session}", h.requireClient(h.sessionInfo))
+	h.mux.HandleFunc("DELETE /sessions/{session}", h.requireClient(h.stopSession))
+	h.mux.HandleFunc("POST /sessions/{session}/members", h.requireClient(h.join))
+	h.mux.HandleFunc("POST /sessions/{session}/messages", h.requireClient(h.publish))
+	h.mux.HandleFunc("GET /sessions/{session}/messages", h.requireClient(h.messages))
 	return h
 }
 
@@ -48,37 +59,105 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *Handler) requireToken(next http.HandlerFunc) http.HandlerFunc {
+func (h *Handler) requireClient(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token == "" {
-			next(w, r)
-			return
-		}
 		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.token)) != 1 {
 			writeError(w, http.StatusUnauthorized, "invalid or missing token")
+			return
+		}
+		if !validVersion(clientVersion(r)) {
+			writeError(w, http.StatusBadRequest, team.VersionHeader+" header must be the team-mcp version, like 0.1.0")
 			return
 		}
 		next(w, r)
 	}
 }
 
-func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
-	teamName, ok := teamFromPath(w, r)
-	if !ok {
+func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
+	var request team.CreateSessionRequest
+	if !decodeJSON(w, r, &request) {
 		return
 	}
 
+	name := strings.TrimSpace(request.Name)
+	createdBy := strings.TrimSpace(request.CreatedBy)
+	if utf8.RuneCountInString(name) > maxNameRunes {
+		writeError(w, http.StatusBadRequest, "name must be at most 64 characters")
+		return
+	}
+	if !validMemberName(createdBy) {
+		writeError(w, http.StatusBadRequest, "createdBy must be 1-64 characters")
+		return
+	}
+
+	created, err := h.store.Create(r.Context(), name, createdBy)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	log.Printf("session=%s created by=%s name=%q", created.ID, createdBy, name)
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (h *Handler) sessionInfo(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := sessionFromPath(w, r)
+	if !ok {
+		return
+	}
+	info, err := h.store.Info(r.Context(), sessionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (h *Handler) stopSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := sessionFromPath(w, r)
+	if !ok {
+		return
+	}
+	stopped, err := h.store.Stop(r.Context(), sessionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	log.Printf("session=%s stopped messages=%d", sessionID, stopped.LatestID)
+	writeJSON(w, http.StatusOK, stopped)
+}
+
+func (h *Handler) join(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := sessionFromPath(w, r)
+	if !ok {
+		return
+	}
+	var request team.JoinRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	name := strings.TrimSpace(request.Name)
+	if !validMemberName(name) {
+		writeError(w, http.StatusBadRequest, "name must be 1-64 characters")
+		return
+	}
+
+	joined, err := h.store.Join(r.Context(), sessionID, name, clientVersion(r))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	log.Printf("session=%s joined name=%s", sessionID, name)
+	writeJSON(w, http.StatusOK, joined)
+}
+
+func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := sessionFromPath(w, r)
+	if !ok {
+		return
+	}
 	var request team.PublishRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeJSON(w, r, &request) {
 		return
 	}
 
@@ -90,7 +169,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	text := strings.TrimSpace(request.Text)
 
 	switch {
-	case from == "" || utf8.RuneCountInString(from) > maxNameRunes:
+	case !validMemberName(from):
 		writeError(w, http.StatusBadRequest, "from must be 1-64 characters")
 		return
 	case utf8.RuneCountInString(kind) > maxKindRunes:
@@ -104,13 +183,17 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	message := h.store.Append(teamName, from, kind, text)
-	log.Printf("team=%s id=%d from=%s kind=%s chars=%d", teamName, message.ID, from, kind, utf8.RuneCountInString(text))
+	message, err := h.store.Append(r.Context(), sessionID, from, kind, text)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	log.Printf("session=%s id=%d from=%s kind=%s chars=%d", sessionID, message.ID, from, kind, utf8.RuneCountInString(text))
 	writeJSON(w, http.StatusCreated, team.PublishResponse{ID: message.ID})
 }
 
 func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
-	teamName, ok := teamFromPath(w, r)
+	sessionID, ok := sessionFromPath(w, r)
 	if !ok {
 		return
 	}
@@ -126,16 +209,48 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, h.store.Since(teamName, since, int(limit)))
+	page, err := h.store.Since(r.Context(), sessionID, r.URL.Query().Get("member"), since, int(limit))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
-func teamFromPath(w http.ResponseWriter, r *http.Request) (string, bool) {
-	teamName := r.PathValue("team")
-	if !teamNamePattern.MatchString(teamName) {
-		writeError(w, http.StatusBadRequest, "team must be 1-64 letters, digits, '-' or '_'")
+func sessionFromPath(w http.ResponseWriter, r *http.Request) (string, bool) {
+	sessionID := strings.ToLower(r.PathValue("session"))
+	if !sessionIDPattern.MatchString(sessionID) {
+		writeError(w, http.StatusBadRequest, "session id must be a UUID")
 		return "", false
 	}
-	return teamName, true
+	return sessionID, true
+}
+
+func clientVersion(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get(team.VersionHeader))
+}
+
+func validVersion(version string) bool {
+	return utf8.RuneCountInString(version) <= maxVersionRunes && versionPattern.MatchString(version)
+}
+
+func validMemberName(name string) bool {
+	return name != "" && utf8.RuneCountInString(name) <= maxNameRunes
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return false
+	}
+	return true
 }
 
 func parseIntParam(r *http.Request, name string, fallback int64) (int64, error) {
@@ -144,6 +259,20 @@ func parseIntParam(r *http.Request, name string, fallback int64) (int64, error) 
 		return fallback, nil
 	}
 	return strconv.ParseInt(raw, 10, 64)
+}
+
+func writeStoreError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrNotMember):
+		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, ErrTooManySessions):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	default:
+		log.Printf("store error: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
