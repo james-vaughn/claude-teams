@@ -20,21 +20,19 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := first.Create(ctx, "inc-1234", "alice")
+	created, err := first.Create(ctx, "inc-1234", "alice", testVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stopped, err := first.Create(ctx, "old", "alice")
+	stopped, err := first.Create(ctx, "old", "alice", testVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := first.Join(ctx, created.ID, "alice", testVersion); err != nil {
+	sessionID, memberToken := created.Session.ID, created.MemberToken
+	if _, err := first.Append(ctx, sessionID, memberToken, "finding", "before restart"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := first.Append(ctx, created.ID, "alice", "finding", "before restart"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.Stop(ctx, stopped.ID); err != nil {
+	if _, err := first.Stop(ctx, stopped.Session.ID, stopped.MemberToken); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.SetToken(ctx, "persisted-token"); err != nil {
@@ -46,7 +44,7 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 
 	second := openTestStore(t, path, 10)
 
-	info, err := second.Info(ctx, created.ID)
+	info, err := second.Info(ctx, sessionID, memberToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +52,7 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("unexpected session after reopen: %+v", info)
 	}
 
-	page, err := second.Since(ctx, created.ID, "alice", 0, 10)
+	page, err := second.Since(ctx, sessionID, memberToken, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,15 +60,15 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("unexpected messages after reopen: %+v", page.Messages)
 	}
 
-	next, err := second.Append(ctx, created.ID, "alice", "update", "after restart")
+	next, err := second.Append(ctx, sessionID, memberToken, "update", "after restart")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.ID != 3 {
-		t.Fatalf("id after reopen = %d, want 3", next.ID)
+	if next.ID != 3 || next.From != "alice" {
+		t.Fatalf("message after reopen = %+v, want id 3 from alice", next)
 	}
 
-	if _, err := second.Info(ctx, stopped.ID); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := second.Info(ctx, stopped.Session.ID, stopped.MemberToken); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("stopped session after reopen: err = %v, want ErrSessionNotFound", err)
 	}
 
@@ -84,14 +82,14 @@ func TestStopDeletesMembersAndMessages(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t, filepath.Join(t.TempDir(), "stop.db"), 10)
 
-	created, err := store.Create(ctx, "", "alice")
+	created, err := store.Create(ctx, "", "alice", testVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Join(ctx, created.ID, "alice", testVersion); err != nil {
+	if _, err := store.Join(ctx, created.Session.ID, "bob", testVersion, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Stop(ctx, created.ID); err != nil {
+	if _, err := store.Stop(ctx, created.Session.ID, created.MemberToken); err != nil {
 		t.Fatal(err)
 	}
 
@@ -116,31 +114,25 @@ func TestStopLeavesNoSessionDataOnDisk(t *testing.T) {
 
 	const canary = "CANARY-SECRET-PAYLOAD-12345"
 	const memberName = "canary-member-name"
-	stopped, err := store.Create(ctx, "canary-session-name", memberName)
+	stopped, err := store.Create(ctx, "canary-session-name", memberName, testVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kept, err := store.Create(ctx, "kept", "bob")
+	kept, err := store.Create(ctx, "kept", "bob", testVersion)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Join(ctx, stopped.ID, memberName, testVersion); err != nil {
 		t.Fatal(err)
 	}
 	for range 50 {
-		if _, err := store.Append(ctx, stopped.ID, memberName, "finding", canary+strings.Repeat("x", 500)); err != nil {
+		if _, err := store.Append(ctx, stopped.Session.ID, stopped.MemberToken, "finding", canary+strings.Repeat("x", 500)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.Join(ctx, kept.ID, "bob", testVersion); err != nil {
+
+	if _, err := store.Stop(ctx, stopped.Session.ID, stopped.MemberToken); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := store.Stop(ctx, stopped.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	forbidden := []string{canary, stopped.ID, memberName, "canary-session-name"}
+	forbidden := []string{canary, stopped.Session.ID, memberName, "canary-session-name", hashMemberToken(stopped.MemberToken)}
 	assertNotOnDisk := func(when string) {
 		t.Helper()
 		for _, file := range []string{path, path + "-wal"} {
@@ -166,12 +158,12 @@ func TestStopLeavesNoSessionDataOnDisk(t *testing.T) {
 	assertNotOnDisk("after close")
 
 	reopened := openTestStore(t, path, 10)
-	if _, err := reopened.Info(ctx, kept.ID); err != nil {
+	if _, err := reopened.Info(ctx, kept.Session.ID, kept.MemberToken); err != nil {
 		t.Fatalf("other session lost after scrub: %v", err)
 	}
 }
 
-func TestOpenStoreAddsVersionColumnToOldDatabase(t *testing.T) {
+func TestOpenStoreAddsMemberColumnsToOldDatabase(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "old.db")
 
@@ -192,19 +184,19 @@ func TestOpenStoreAddsVersionColumnToOldDatabase(t *testing.T) {
 	}
 
 	store := openTestStore(t, path, 10)
-	info, err := store.Info(ctx, "s1")
+	if _, err := store.Join(ctx, "s1", "alice", testVersion, ""); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("claiming a member that has no secret: err = %v, want ErrNameTaken", err)
+	}
+	joined, err := store.Join(ctx, "s1", "bob", testVersion, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(info.Members) != 1 || info.Members[0].MCPVersion != "" {
-		t.Fatalf("unexpected members after migration: %+v", info.Members)
+	members := joined.Session.Members
+	if len(members) != 2 || members[0].Name != "alice" || members[0].MCPVersion != "" || members[1].Name != "bob" || members[1].MCPVersion != testVersion {
+		t.Fatalf("unexpected members after migration: %+v", members)
 	}
-	joined, err := store.Join(ctx, "s1", "alice", testVersion)
-	if err != nil {
+	if _, err := store.Info(ctx, "s1", joined.MemberToken); err != nil {
 		t.Fatal(err)
-	}
-	if joined.Session.Members[0].MCPVersion != testVersion {
-		t.Fatalf("version after rejoin = %q, want %q", joined.Session.Members[0].MCPVersion, testVersion)
 	}
 }
 
@@ -220,11 +212,8 @@ func TestConcurrentAppendsGetUniqueSequentialIDs(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t, filepath.Join(t.TempDir(), "concurrent.db"), 10)
 
-	created, err := store.Create(ctx, "", "alice")
+	created, err := store.Create(ctx, "", "alice", testVersion)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Join(ctx, created.ID, "alice", testVersion); err != nil {
 		t.Fatal(err)
 	}
 
@@ -235,7 +224,7 @@ func TestConcurrentAppendsGetUniqueSequentialIDs(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := store.Append(ctx, created.ID, "alice", "update", "x"); err != nil {
+			if _, err := store.Append(ctx, created.Session.ID, created.MemberToken, "update", "x"); err != nil {
 				errs <- err
 			}
 		}()
@@ -246,7 +235,7 @@ func TestConcurrentAppendsGetUniqueSequentialIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := store.Since(ctx, created.ID, "", 0, 100)
+	page, err := store.Since(ctx, created.Session.ID, created.MemberToken, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

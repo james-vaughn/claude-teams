@@ -73,11 +73,21 @@ command = "/Users/you/Git/claude-teams/bin/team-mcp"
 |---|---|---|
 | `team_start_session` | `url`, `token`, `name`, `sessionName?` | Creates a session, joins it, and returns its `sessionId` to share. |
 | `team_join` | `url`, `token`, `sessionId`, `name` | Joins an existing session and returns its members and `latestId`. Resets the read cursor to 0. |
-| `team_stop_session` | `sessionId?` | Stops the session you are in, or another session on the same server. Deletes its log and removes every member. |
+| `team_stop_session` | none | Stops the session you are in. Deletes its log and removes every member. |
 | `team_publish` | `text`, `kind?` (default `update`) | `{ id }` |
 | `team_receive` | `since?`, `limit?` (default 100, max 500) | Messages with `id > since`, plus `cursor`, `latestId`, `hasMore`. Without `since` it continues from the last message received. |
 
 An agent is in one session at a time. Starting or joining another session replaces the current one.
+
+## Members
+
+When an agent starts or joins a session, the server gives it a member token. `team-mcp` keeps the token in memory and sends it on every later request. The server uses it to decide who the agent is:
+
+- The sender of a published message is the member that owns the token. Clients can't choose the sender.
+- Only members can read messages, see session info or stop the session. The agent that starts a session joins it at the same time, so it's a member too.
+- A name belongs to the first member that joins with it. Joining with a name that's already taken fails with `409`, unless the request sends that member's current token. A rejoin like that issues a new token and the old one stops working.
+
+The server stores only a SHA-256 hash of each member token. Tokens aren't saved on disk by `team-mcp`, so after you restart the agent, join again with a new name.
 
 ## Usage
 
@@ -104,24 +114,27 @@ Then:
 Every endpoint except `/healthz` requires two headers:
 
 - `Authorization: Bearer <token>`
-- `X-Team-MCP-Version: <version>`: the version of `team-mcp` making the request, like `0.1.0`. `team-mcp` sends it on every request. The server stores it on the member when they join, and session info shows it as `mcpVersion` on each member.
+- `X-Team-MCP-Version: <version>`: the version of `team-mcp` making the request, like `0.2.0`. `team-mcp` sends it on every request. The server stores it on the member when they join, and session info shows it as `mcpVersion` on each member.
 
-| Method | Path | Body / query | Response |
-|---|---|---|---|
-| `GET` | `/healthz` | none | `{"status": "ok"}` |
-| `POST` | `/sessions` | `{"name": "...", "createdBy": "..."}` | `201` session info |
-| `GET` | `/sessions/{id}` | none | session info: `id`, `name`, `createdBy`, `createdAt`, `members` (`name`, `mcpVersion`, `joinedAt`, `lastSeen`), `latestId` |
-| `DELETE` | `/sessions/{id}` | none | session info of the stopped session |
-| `POST` | `/sessions/{id}/members` | `{"name": "..."}` | `{"session": {...}, "joinMessageId": n}` |
-| `POST` | `/sessions/{id}/messages` | `{"from": "...", "kind": "...", "text": "..."}` | `201 {"id": n}` |
-| `GET` | `/sessions/{id}/messages` | `?since=n&limit=m&member=name` | `{"messages": [...], "latestId": n, "hasMore": bool}` |
+Endpoints marked "member" also require `X-Team-Member-Token: <memberToken>`, the token from the create or join response.
+
+| Method | Path | Auth | Body / query | Response |
+|---|---|---|---|---|
+| `GET` | `/healthz` | none | none | `{"status": "ok"}` |
+| `POST` | `/sessions` | server | `{"name": "...", "createdBy": "..."}` | `201` join response for `createdBy` |
+| `GET` | `/sessions/{id}` | member | none | session info: `id`, `name`, `createdBy`, `createdAt`, `members` (`name`, `mcpVersion`, `joinedAt`, `lastSeen`), `latestId` |
+| `DELETE` | `/sessions/{id}` | member | none | session info of the stopped session |
+| `POST` | `/sessions/{id}/members` | server, plus member to rejoin | `{"name": "..."}` | join response: `{"session": {...}, "joinMessageId": n, "memberToken": "..."}` |
+| `POST` | `/sessions/{id}/messages` | member | `{"kind": "...", "text": "..."}` | `201 {"id": n}` |
+| `GET` | `/sessions/{id}/messages` | member | `?since=n&limit=m` | `{"messages": [...], "latestId": n, "hasMore": bool}` |
 
 Errors:
 
 - `400`: the request is invalid, or `X-Team-MCP-Version` is missing or isn't a version like `0.1.0`.
 - `401`: the token is missing or wrong.
 - `404`: the session doesn't exist or was stopped.
-- `403`: `from` hasn't joined the session.
+- `403`: the member token is missing or doesn't belong to a member of this session.
+- `409`: another member already uses that name in the session.
 - `503`: the server reached `-max-sessions`.
 
 Names are 1-64 characters. Message text can be up to 16,000 characters.

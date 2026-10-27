@@ -91,12 +91,12 @@ func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.store.Create(r.Context(), name, createdBy)
+	created, err := h.store.Create(r.Context(), name, createdBy, clientVersion(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	log.Printf("session=%s created by=%s name=%q", created.ID, createdBy, name)
+	log.Printf("session=%s created by=%s name=%q", created.Session.ID, createdBy, name)
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -105,7 +105,7 @@ func (h *Handler) sessionInfo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	info, err := h.store.Info(r.Context(), sessionID)
+	info, err := h.store.Info(r.Context(), sessionID, memberToken(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -118,7 +118,7 @@ func (h *Handler) stopSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	stopped, err := h.store.Stop(r.Context(), sessionID)
+	stopped, err := h.store.Stop(r.Context(), sessionID, memberToken(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -142,7 +142,7 @@ func (h *Handler) join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	joined, err := h.store.Join(r.Context(), sessionID, name, clientVersion(r))
+	joined, err := h.store.Join(r.Context(), sessionID, name, clientVersion(r), memberToken(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -161,7 +161,6 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	from := strings.TrimSpace(request.From)
 	kind := strings.TrimSpace(request.Kind)
 	if kind == "" {
 		kind = defaultKind
@@ -169,9 +168,6 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	text := strings.TrimSpace(request.Text)
 
 	switch {
-	case !validMemberName(from):
-		writeError(w, http.StatusBadRequest, "from must be 1-64 characters")
-		return
 	case utf8.RuneCountInString(kind) > maxKindRunes:
 		writeError(w, http.StatusBadRequest, "kind must be at most 32 characters")
 		return
@@ -183,12 +179,12 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	message, err := h.store.Append(r.Context(), sessionID, from, kind, text)
+	message, err := h.store.Append(r.Context(), sessionID, memberToken(r), kind, text)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	log.Printf("session=%s id=%d from=%s kind=%s chars=%d", sessionID, message.ID, from, kind, utf8.RuneCountInString(text))
+	log.Printf("session=%s id=%d from=%s kind=%s chars=%d", sessionID, message.ID, message.From, kind, utf8.RuneCountInString(text))
 	writeJSON(w, http.StatusCreated, team.PublishResponse{ID: message.ID})
 }
 
@@ -209,7 +205,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, err := h.store.Since(r.Context(), sessionID, r.URL.Query().Get("member"), since, int(limit))
+	page, err := h.store.Since(r.Context(), sessionID, memberToken(r), since, int(limit))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -224,6 +220,10 @@ func sessionFromPath(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return sessionID, true
+}
+
+func memberToken(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get(team.MemberTokenHeader))
 }
 
 func clientVersion(r *http.Request) string {
@@ -267,6 +267,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrNotMember):
 		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, ErrNameTaken):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrTooManySessions):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	default:

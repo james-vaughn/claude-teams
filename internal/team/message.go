@@ -2,7 +2,10 @@ package team
 
 import "time"
 
-const VersionHeader = "X-Team-MCP-Version"
+const (
+	VersionHeader     = "X-Team-MCP-Version"
+	MemberTokenHeader = "X-Team-Member-Token"
+)
 
 type Message struct {
 	ID        int64     `json:"id"`
@@ -39,12 +42,12 @@ type JoinRequest struct {
 }
 
 type JoinResponse struct {
-	Session SessionInfo `json:"session"`
-	JoinID  int64       `json:"joinMessageId"`
+	Session     SessionInfo `json:"session"`
+	JoinID      int64       `json:"joinMessageId"`
+	MemberToken string      `json:"memberToken"`
 }
 
 type PublishRequest struct {
-	From string `json:"from"`
 	Kind string `json:"kind"`
 	Text string `json:"text"`
 }

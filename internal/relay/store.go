@@ -3,7 +3,9 @@ package relay
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -18,7 +20,8 @@ import (
 var (
 	ErrSessionNotFound = errors.New("session not found or already stopped")
 	ErrTooManySessions = errors.New("server has reached its session limit")
-	ErrNotMember       = errors.New("join the session before publishing")
+	ErrNotMember       = errors.New("send the member token you got when you joined this session")
+	ErrNameTaken       = errors.New("another member already uses this name in the session; pick a different name")
 )
 
 const schema = `
@@ -39,6 +42,7 @@ CREATE TABLE IF NOT EXISTS members (
 	session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
 	name        TEXT NOT NULL,
 	mcp_version TEXT NOT NULL DEFAULT '',
+	secret_hash TEXT NOT NULL DEFAULT '',
 	joined_at   INTEGER NOT NULL,
 	last_seen   INTEGER NOT NULL,
 	PRIMARY KEY (session_id, name)
@@ -81,23 +85,32 @@ func OpenStore(ctx context.Context, path string, maxSessions int) (*Store, error
 		db.Close()
 		return nil, fmt.Errorf("create schema in %s: %w", path, err)
 	}
-	if err := addMemberVersionColumn(ctx, db); err != nil {
+	if err := addMissingMemberColumns(ctx, db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate schema in %s: %w", path, err)
 	}
 	return &Store{db: db, maxSessions: maxSessions, now: time.Now}, nil
 }
 
-func addMemberVersionColumn(ctx context.Context, db *sql.DB) error {
+func addMissingMemberColumns(ctx context.Context, db *sql.DB) error {
+	for _, column := range []string{"mcp_version", "secret_hash"} {
+		if err := addMemberTextColumn(ctx, db, column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addMemberTextColumn(ctx context.Context, db *sql.DB, column string) error {
 	var present int
 	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pragma_table_info('members') WHERE name = 'mcp_version'`).Scan(&present); err != nil {
+		`SELECT COUNT(*) FROM pragma_table_info('members') WHERE name = ?`, column).Scan(&present); err != nil {
 		return err
 	}
 	if present > 0 {
 		return nil
 	}
-	_, err := db.ExecContext(ctx, `ALTER TABLE members ADD COLUMN mcp_version TEXT NOT NULL DEFAULT ''`)
+	_, err := db.ExecContext(ctx, `ALTER TABLE members ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -121,13 +134,13 @@ func (s *Store) SetToken(ctx context.Context, token string) error {
 	return err
 }
 
-func (s *Store) Create(ctx context.Context, name, createdBy string) (team.SessionInfo, error) {
+func (s *Store) Create(ctx context.Context, name, createdBy, mcpVersion string) (team.JoinResponse, error) {
 	id, err := newUUID()
 	if err != nil {
-		return team.SessionInfo{}, err
+		return team.JoinResponse{}, err
 	}
 
-	var info team.SessionInfo
+	var response team.JoinResponse
 	err = s.inTx(ctx, func(tx *sql.Tx) error {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
@@ -141,15 +154,21 @@ func (s *Store) Create(ctx context.Context, name, createdBy string) (team.Sessio
 			id, name, createdBy, s.timestamp()); err != nil {
 			return err
 		}
-		info, err = sessionInfo(ctx, tx, id)
+		response, err = s.joinMember(ctx, tx, id, createdBy, mcpVersion, "")
 		return err
 	})
-	return info, err
+	return response, err
 }
 
-func (s *Store) Info(ctx context.Context, id string) (team.SessionInfo, error) {
+func (s *Store) Info(ctx context.Context, id, memberToken string) (team.SessionInfo, error) {
 	var info team.SessionInfo
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := requireSession(ctx, tx, id); err != nil {
+			return err
+		}
+		if _, err := s.authenticateMember(ctx, tx, id, memberToken); err != nil {
+			return err
+		}
 		var err error
 		info, err = sessionInfo(ctx, tx, id)
 		return err
@@ -157,9 +176,15 @@ func (s *Store) Info(ctx context.Context, id string) (team.SessionInfo, error) {
 	return info, err
 }
 
-func (s *Store) Stop(ctx context.Context, id string) (team.SessionInfo, error) {
+func (s *Store) Stop(ctx context.Context, id, memberToken string) (team.SessionInfo, error) {
 	var info team.SessionInfo
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := requireSession(ctx, tx, id); err != nil {
+			return err
+		}
+		if _, err := s.authenticateMember(ctx, tx, id, memberToken); err != nil {
+			return err
+		}
 		var err error
 		if info, err = sessionInfo(ctx, tx, id); err != nil {
 			return err
@@ -187,54 +212,69 @@ func (s *Store) truncateWAL(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Join(ctx context.Context, id, name, mcpVersion string) (team.JoinResponse, error) {
+func (s *Store) Join(ctx context.Context, id, name, mcpVersion, presentedToken string) (team.JoinResponse, error) {
 	var response team.JoinResponse
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		if err := requireSession(ctx, tx, id); err != nil {
 			return err
 		}
-		now := s.timestamp()
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO members (session_id, name, mcp_version, joined_at, last_seen) VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT (session_id, name) DO UPDATE SET mcp_version = excluded.mcp_version, last_seen = excluded.last_seen`,
-			id, name, mcpVersion, now, now); err != nil {
-			return err
-		}
-		joined, err := appendMessage(ctx, tx, id, name, "join", name+" joined the session", now)
-		if err != nil {
-			return err
-		}
-		info, err := sessionInfo(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		response = team.JoinResponse{Session: info, JoinID: joined.ID}
-		return nil
+		var err error
+		response, err = s.joinMember(ctx, tx, id, name, mcpVersion, presentedToken)
+		return err
 	})
 	return response, err
 }
 
-func (s *Store) Append(ctx context.Context, id, from, kind, text string) (team.Message, error) {
+func (s *Store) joinMember(ctx context.Context, tx *sql.Tx, id, name, mcpVersion, presentedToken string) (team.JoinResponse, error) {
+	var storedHash string
+	err := tx.QueryRowContext(ctx, `SELECT secret_hash FROM members WHERE session_id = ? AND name = ?`, id, name).Scan(&storedHash)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return team.JoinResponse{}, err
+	case storedHash == "" || presentedToken == "" || hashMemberToken(presentedToken) != storedHash:
+		return team.JoinResponse{}, ErrNameTaken
+	}
+
+	memberToken, err := newMemberToken()
+	if err != nil {
+		return team.JoinResponse{}, err
+	}
+	now := s.timestamp()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO members (session_id, name, mcp_version, secret_hash, joined_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (session_id, name) DO UPDATE SET mcp_version = excluded.mcp_version, secret_hash = excluded.secret_hash, last_seen = excluded.last_seen`,
+		id, name, mcpVersion, hashMemberToken(memberToken), now, now); err != nil {
+		return team.JoinResponse{}, err
+	}
+	joined, err := appendMessage(ctx, tx, id, name, "join", name+" joined the session", now)
+	if err != nil {
+		return team.JoinResponse{}, err
+	}
+	info, err := sessionInfo(ctx, tx, id)
+	if err != nil {
+		return team.JoinResponse{}, err
+	}
+	return team.JoinResponse{Session: info, JoinID: joined.ID, MemberToken: memberToken}, nil
+}
+
+func (s *Store) Append(ctx context.Context, id, memberToken, kind, text string) (team.Message, error) {
 	var message team.Message
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		if err := requireSession(ctx, tx, id); err != nil {
 			return err
 		}
-		now := s.timestamp()
-		touched, err := touchMember(ctx, tx, id, from, now)
+		from, err := s.authenticateMember(ctx, tx, id, memberToken)
 		if err != nil {
 			return err
 		}
-		if !touched {
-			return ErrNotMember
-		}
-		message, err = appendMessage(ctx, tx, id, from, kind, text, now)
+		message, err = appendMessage(ctx, tx, id, from, kind, text, s.timestamp())
 		return err
 	})
 	return message, err
 }
 
-func (s *Store) Since(ctx context.Context, id, memberName string, since int64, limit int) (team.MessagesResponse, error) {
+func (s *Store) Since(ctx context.Context, id, memberToken string, since int64, limit int) (team.MessagesResponse, error) {
 	var response team.MessagesResponse
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		var latestID int64
@@ -245,10 +285,8 @@ func (s *Store) Since(ctx context.Context, id, memberName string, since int64, l
 		if err != nil {
 			return err
 		}
-		if memberName != "" {
-			if _, err := touchMember(ctx, tx, id, memberName, s.timestamp()); err != nil {
-				return err
-			}
+		if _, err := s.authenticateMember(ctx, tx, id, memberToken); err != nil {
+			return err
 		}
 
 		rows, err := tx.QueryContext(ctx,
@@ -313,13 +351,18 @@ func requireSession(ctx context.Context, tx *sql.Tx, id string) error {
 	return err
 }
 
-func touchMember(ctx context.Context, tx *sql.Tx, id, name string, now int64) (bool, error) {
-	result, err := tx.ExecContext(ctx, `UPDATE members SET last_seen = ? WHERE session_id = ? AND name = ?`, now, id, name)
-	if err != nil {
-		return false, err
+func (s *Store) authenticateMember(ctx context.Context, tx *sql.Tx, id, memberToken string) (string, error) {
+	if memberToken == "" {
+		return "", ErrNotMember
 	}
-	affected, err := result.RowsAffected()
-	return affected > 0, err
+	var name string
+	err := tx.QueryRowContext(ctx,
+		`UPDATE members SET last_seen = ? WHERE session_id = ? AND secret_hash = ? RETURNING name`,
+		s.timestamp(), id, hashMemberToken(memberToken)).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotMember
+	}
+	return name, err
 }
 
 func appendMessage(ctx context.Context, tx *sql.Tx, id, from, kind, text string, now int64) (team.Message, error) {
@@ -384,4 +427,17 @@ func newUUID() (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+func newMemberToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func hashMemberToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }

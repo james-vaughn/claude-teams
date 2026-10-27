@@ -49,37 +49,36 @@ func (c *Client) BaseURL() string {
 	return c.baseURL
 }
 
-func (c *Client) CreateSession(ctx context.Context, request team.CreateSessionRequest) (team.SessionInfo, error) {
-	var response team.SessionInfo
-	err := c.doJSON(ctx, http.MethodPost, "/sessions", request, &response)
-	return response, err
-}
-
-func (c *Client) StopSession(ctx context.Context, sessionID string) (team.SessionInfo, error) {
-	var response team.SessionInfo
-	err := c.do(ctx, http.MethodDelete, sessionPath(sessionID), nil, &response)
-	return response, err
-}
-
-func (c *Client) Join(ctx context.Context, sessionID, name string) (team.JoinResponse, error) {
+func (c *Client) CreateSession(ctx context.Context, request team.CreateSessionRequest) (team.JoinResponse, error) {
 	var response team.JoinResponse
-	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/members", team.JoinRequest{Name: name}, &response)
+	err := c.doJSON(ctx, http.MethodPost, "/sessions", "", request, &response)
 	return response, err
 }
 
-func (c *Client) Publish(ctx context.Context, sessionID string, request team.PublishRequest) (team.PublishResponse, error) {
+func (c *Client) StopSession(ctx context.Context, sessionID, memberToken string) (team.SessionInfo, error) {
+	var response team.SessionInfo
+	err := c.do(ctx, http.MethodDelete, sessionPath(sessionID), memberToken, nil, &response)
+	return response, err
+}
+
+func (c *Client) Join(ctx context.Context, sessionID, name, memberToken string) (team.JoinResponse, error) {
+	var response team.JoinResponse
+	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/members", memberToken, team.JoinRequest{Name: name}, &response)
+	return response, err
+}
+
+func (c *Client) Publish(ctx context.Context, sessionID, memberToken string, request team.PublishRequest) (team.PublishResponse, error) {
 	var response team.PublishResponse
-	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/messages", request, &response)
+	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/messages", memberToken, request, &response)
 	return response, err
 }
 
-func (c *Client) Since(ctx context.Context, sessionID, member string, since int64, limit int) (team.MessagesResponse, error) {
+func (c *Client) Since(ctx context.Context, sessionID, memberToken string, since int64, limit int) (team.MessagesResponse, error) {
 	var response team.MessagesResponse
 	query := url.Values{}
 	query.Set("since", strconv.FormatInt(since, 10))
 	query.Set("limit", strconv.Itoa(limit))
-	query.Set("member", member)
-	err := c.do(ctx, http.MethodGet, sessionPath(sessionID)+"/messages?"+query.Encode(), nil, &response)
+	err := c.do(ctx, http.MethodGet, sessionPath(sessionID)+"/messages?"+query.Encode(), memberToken, nil, &response)
 	return response, err
 }
 
@@ -87,15 +86,15 @@ func sessionPath(sessionID string) string {
 	return "/sessions/" + url.PathEscape(strings.TrimSpace(sessionID))
 }
 
-func (c *Client) doJSON(ctx context.Context, method, path string, payload, out any) error {
+func (c *Client) doJSON(ctx context.Context, method, path, memberToken string, payload, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	return c.do(ctx, method, path, bytes.NewReader(body), out)
+	return c.do(ctx, method, path, memberToken, bytes.NewReader(body), out)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
+func (c *Client) do(ctx context.Context, method, path, memberToken string, body io.Reader, out any) error {
 	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return err
@@ -108,6 +107,9 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	}
 	if c.token != "" {
 		request.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if memberToken != "" {
+		request.Header.Set(team.MemberTokenHeader, memberToken)
 	}
 
 	response, err := c.httpClient.Do(request)
