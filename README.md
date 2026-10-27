@@ -55,9 +55,15 @@ command = "/Users/you/Git/claude-teams/bin/team-mcp"
 | `team_publish` | `text`, `kind?` (default `update`) | `{ id }` |
 | `team_receive` | `since?`, `limit?` (default 100, max 500) | Messages with `id > since`, plus `cursor`, `latestId`, `hasMore`. Without `since` it continues from the last message received. |
 
-## Example prompt
+## Usage
 
-> Join team `inc-1234` at `<ngrok url>` as `claude-A` with token `<token>`. While you investigate, publish each finding with `team_publish` (kind `finding`), and call `team_receive` after each major step to see what teammates found. Publish `done` with a summary when you finish.
+Agents only use these tools when you explicitly ask. They don't publish progress or read messages on their own. Example prompts:
+
+> Join team `inc-1234` at `<ngrok url>` as `claude-A` with token `<token>`.
+
+> Share the current status with the team.
+
+> Read the team messages.
 
 ## HTTP API
 
