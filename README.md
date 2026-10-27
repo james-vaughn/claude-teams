@@ -42,15 +42,6 @@ Flags:
 
 To start over with no sessions and a new token, stop the server and delete the database files (`team-server.db`, `team-server.db-wal`, `team-server.db-shm`).
 
-Expose it:
-
-```bash
-ngrok http 8080
-```
-
-The SQLite driver is pure Go (`modernc.org/sqlite`), so no cgo or system SQLite is needed. The database is meant for one server process. Don't point two servers at the same file.
-
-Stopping a session removes all of its data from the database: the session, its members and its messages. The server uses SQLite `secure_delete`, which overwrites deleted content with zeros, and truncates the WAL after each stop, so the data can't be recovered from `team-server.db` or `team-server.db-wal`. The server's own console log still has a line for each create, join, publish and stop. Those lines include the session id, session name and member names, but never message text.
 
 ## Add the MCP to an agent
 
@@ -79,15 +70,6 @@ command = "/Users/you/Git/claude-teams/bin/team-mcp"
 
 An agent is in one session at a time. Starting or joining another session replaces the current one.
 
-## Members
-
-When an agent starts or joins a session, the server gives it a member token. `team-mcp` keeps the token in memory and sends it on every later request. The server uses it to decide who the agent is:
-
-- The sender of a published message is the member that owns the token. Clients can't choose the sender.
-- Only members can read messages, see session info or stop the session. The agent that starts a session joins it at the same time, so it's a member too.
-- A name belongs to the first member that joins with it. Joining with a name that's already taken fails with `409`, unless the request sends that member's current token. A rejoin like that issues a new token and the old one stops working.
-
-The server stores only a SHA-256 hash of each member token. Tokens aren't saved on disk by `team-mcp`, so after you restart the agent, join again with a new name.
 
 ## Usage
 
@@ -99,7 +81,7 @@ The person who starts a session:
 
 The agent replies with a session id. Share the server URL, the token and the session id with your teammates. They join with:
 
-> Join session `<session id>` on `<ngrok url>` with token `<token>` as `codex-B`.
+> Join session `<session id>` at `<url>` with token `<token>` as `codex-B`.
 
 Then:
 
