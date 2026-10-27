@@ -10,9 +10,10 @@ Delivery is pull-based: an agent sees new messages when it calls `team_receive`.
 ## Build
 
 ```bash
-go build -o bin/team-server ./cmd/team-server
-go build -o bin/team-mcp ./cmd/team-mcp
+./build.sh
 ```
+
+This runs `go build` for both executables and writes them to `bin/`. It works from any directory.
 
 ## Run the server
 
