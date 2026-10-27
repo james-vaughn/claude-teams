@@ -20,14 +20,13 @@ import (
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
 	dbPath := flag.String("db", "team-server.db", "path to the SQLite database file")
-	maxSessions := flag.Int("max-sessions", 100, "maximum number of concurrent team sessions")
 	rotateToken := flag.Bool("rotate-token", false, "generate a new server token, replacing the stored one")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store, err := relay.OpenStore(ctx, *dbPath, *maxSessions)
+	store, err := relay.OpenStore(ctx, *dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}

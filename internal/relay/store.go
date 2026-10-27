@@ -19,7 +19,6 @@ import (
 
 var (
 	ErrSessionNotFound = errors.New("session not found or already stopped")
-	ErrTooManySessions = errors.New("server has reached its session limit")
 	ErrNotMember       = errors.New("send the member token you got when you joined this session")
 	ErrNameTaken       = errors.New("another member already uses this name in the session; pick a different name")
 )
@@ -62,12 +61,11 @@ CREATE TABLE IF NOT EXISTS messages (
 const tokenKey = "token"
 
 type Store struct {
-	db          *sql.DB
-	maxSessions int
-	now         func() time.Time
+	db  *sql.DB
+	now func() time.Time
 }
 
-func OpenStore(ctx context.Context, path string, maxSessions int) (*Store, error) {
+func OpenStore(ctx context.Context, path string) (*Store, error) {
 	pragmas := url.Values{}
 	pragmas.Add("_pragma", "foreign_keys(1)")
 	pragmas.Add("_pragma", "busy_timeout(5000)")
@@ -89,7 +87,7 @@ func OpenStore(ctx context.Context, path string, maxSessions int) (*Store, error
 		db.Close()
 		return nil, fmt.Errorf("migrate schema in %s: %w", path, err)
 	}
-	return &Store{db: db, maxSessions: maxSessions, now: time.Now}, nil
+	return &Store{db: db, now: time.Now}, nil
 }
 
 func addMissingMemberColumns(ctx context.Context, db *sql.DB) error {
@@ -142,13 +140,6 @@ func (s *Store) Create(ctx context.Context, name, createdBy, mcpVersion string) 
 
 	var response team.JoinResponse
 	err = s.inTx(ctx, func(tx *sql.Tx) error {
-		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
-			return err
-		}
-		if count >= s.maxSessions {
-			return ErrTooManySessions
-		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO sessions (id, name, created_by, created_at) VALUES (?, ?, ?, ?)`,
 			id, name, createdBy, s.timestamp()); err != nil {

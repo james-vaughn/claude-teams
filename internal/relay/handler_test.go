@@ -25,9 +25,9 @@ type testServer struct {
 	version string
 }
 
-func openTestStore(t *testing.T, path string, maxSessions int) *Store {
+func openTestStore(t *testing.T, path string) *Store {
 	t.Helper()
-	store, err := OpenStore(context.Background(), path, maxSessions)
+	store, err := OpenStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,9 +35,9 @@ func openTestStore(t *testing.T, path string, maxSessions int) *Store {
 	return store
 }
 
-func newTestServer(t *testing.T, maxSessions int) *testServer {
+func newTestServer(t *testing.T) *testServer {
 	t.Helper()
-	store := openTestStore(t, filepath.Join(t.TempDir(), "test.db"), maxSessions)
+	store := openTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 	server := httptest.NewServer(NewHandler(store, testToken))
 	t.Cleanup(server.Close)
 	return &testServer{t: t, baseURL: server.URL, version: testVersion}
@@ -120,7 +120,7 @@ func (s *testServer) messages(sessionID, memberToken, query string) team.Message
 }
 
 func TestCreateSessionJoinsCreator(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	created := server.createSession("alice")
 
 	if !sessionIDPattern.MatchString(created.Session.ID) {
@@ -141,7 +141,7 @@ func TestCreateSessionJoinsCreator(t *testing.T) {
 }
 
 func TestJoinPublishAndReceive(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 
@@ -174,7 +174,7 @@ func TestJoinPublishAndReceive(t *testing.T) {
 }
 
 func TestPublishTakesSenderFromMemberToken(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 	bob := server.join(sessionID, "bob")
@@ -192,7 +192,7 @@ func TestPublishTakesSenderFromMemberToken(t *testing.T) {
 }
 
 func TestNameCannotBeTakenOver(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 
@@ -216,7 +216,7 @@ func TestNameCannotBeTakenOver(t *testing.T) {
 }
 
 func TestReadingAndStoppingRequireMembership(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	sessionID := server.createSession("alice").Session.ID
 	outsider := server.createSession("mallory")
 
@@ -237,7 +237,7 @@ func TestReadingAndStoppingRequireMembership(t *testing.T) {
 }
 
 func TestAnyMemberCanStopSession(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 	bob := server.join(sessionID, "bob")
@@ -264,7 +264,7 @@ func TestAnyMemberCanStopSession(t *testing.T) {
 }
 
 func TestSessionsAreIsolated(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	bob := server.createSession("bob")
 
@@ -279,7 +279,7 @@ func TestSessionsAreIsolated(t *testing.T) {
 }
 
 func TestMessagesHonorsLimit(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 	for range 4 {
@@ -295,7 +295,7 @@ func TestMessagesHonorsLimit(t *testing.T) {
 }
 
 func TestEmptyPageReturnsEmptyArray(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 
 	status, raw := server.request(http.MethodGet, "/sessions/"+alice.Session.ID+"/messages?since=1", testToken, alice.MemberToken, nil)
@@ -305,7 +305,7 @@ func TestEmptyPageReturnsEmptyArray(t *testing.T) {
 }
 
 func TestUnknownAndInvalidSessionIDs(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 
 	if status, _ := server.request(http.MethodGet, "/sessions/00000000-0000-4000-8000-000000000000", testToken, "", nil); status != http.StatusNotFound {
 		t.Fatalf("unknown session: status %d, want 404", status)
@@ -316,7 +316,7 @@ func TestUnknownAndInvalidSessionIDs(t *testing.T) {
 }
 
 func TestValidation(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 
@@ -346,19 +346,8 @@ func TestValidation(t *testing.T) {
 	}
 }
 
-func TestSessionLimit(t *testing.T) {
-	server := newTestServer(t, 1)
-	alice := server.createSession("alice")
-
-	if status, _ := server.request(http.MethodPost, "/sessions", testToken, "", team.CreateSessionRequest{CreatedBy: "bob"}); status != http.StatusServiceUnavailable {
-		t.Fatalf("over limit: status %d, want 503", status)
-	}
-	server.do(http.MethodDelete, "/sessions/"+alice.Session.ID, alice.MemberToken, nil, nil, http.StatusOK)
-	server.createSession("bob")
-}
-
 func TestTokenAlwaysRequired(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 
@@ -383,7 +372,7 @@ func TestTokenAlwaysRequired(t *testing.T) {
 }
 
 func TestVersionAlwaysRequired(t *testing.T) {
-	server := newTestServer(t, 10)
+	server := newTestServer(t)
 	alice := server.createSession("alice")
 	sessionID := alice.Session.ID
 
@@ -430,5 +419,5 @@ func TestNewHandlerRejectsEmptyToken(t *testing.T) {
 			t.Fatal("expected panic for empty token")
 		}
 	}()
-	NewHandler(openTestStore(t, filepath.Join(t.TempDir(), "test.db"), 1), "")
+	NewHandler(openTestStore(t, filepath.Join(t.TempDir(), "test.db")), "")
 }

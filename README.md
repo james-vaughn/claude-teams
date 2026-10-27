@@ -37,7 +37,6 @@ Flags:
 |---|---|---|
 | `-port` | `8080` | Port to listen on |
 | `-db` | `team-server.db` | Path to the SQLite database file. It's created if it doesn't exist. |
-| `-max-sessions` | `100` | Maximum number of sessions at the same time |
 | `-rotate-token` | `false` | Generate a new token and save it in place of the stored one. Clients using the old token get `401`. |
 
 To start over with no sessions and a new token, stop the server and delete the database files (`team-server.db`, `team-server.db-wal`, `team-server.db-shm`).
@@ -117,7 +116,6 @@ Errors:
 - `404`: the session doesn't exist or was stopped.
 - `403`: the member token is missing or doesn't belong to a member of this session.
 - `409`: another member already uses that name in the session.
-- `503`: the server reached `-max-sessions`.
 
 Names are 1-64 characters. Message text can be up to 16,000 characters.
 

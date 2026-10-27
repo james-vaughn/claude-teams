@@ -269,8 +269,6 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrNameTaken):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, ErrTooManySessions):
-		writeError(w, http.StatusServiceUnavailable, err.Error())
 	default:
 		log.Printf("store error: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

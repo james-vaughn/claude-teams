@@ -16,7 +16,7 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "persist.db")
 
-	first, err := OpenStore(ctx, path, 10)
+	first, err := OpenStore(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second := openTestStore(t, path, 10)
+	second := openTestStore(t, path)
 
 	info, err := second.Info(ctx, sessionID, memberToken)
 	if err != nil {
@@ -80,7 +80,7 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 
 func TestStopDeletesMembersAndMessages(t *testing.T) {
 	ctx := context.Background()
-	store := openTestStore(t, filepath.Join(t.TempDir(), "stop.db"), 10)
+	store := openTestStore(t, filepath.Join(t.TempDir(), "stop.db"))
 
 	created, err := store.Create(ctx, "", "alice", testVersion)
 	if err != nil {
@@ -107,7 +107,7 @@ func TestStopDeletesMembersAndMessages(t *testing.T) {
 func TestStopLeavesNoSessionDataOnDisk(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "scrub.db")
-	store, err := OpenStore(ctx, path, 10)
+	store, err := OpenStore(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestStopLeavesNoSessionDataOnDisk(t *testing.T) {
 	}
 	assertNotOnDisk("after close")
 
-	reopened := openTestStore(t, path, 10)
+	reopened := openTestStore(t, path)
 	if _, err := reopened.Info(ctx, kept.Session.ID, kept.MemberToken); err != nil {
 		t.Fatalf("other session lost after scrub: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestOpenStoreAddsMemberColumnsToOldDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := openTestStore(t, path, 10)
+	store := openTestStore(t, path)
 	if _, err := store.Join(ctx, "s1", "alice", testVersion, ""); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("claiming a member that has no secret: err = %v, want ErrNameTaken", err)
 	}
@@ -201,7 +201,7 @@ func TestOpenStoreAddsMemberColumnsToOldDatabase(t *testing.T) {
 }
 
 func TestTokenEmptyWhenUnset(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "token.db"), 10)
+	store := openTestStore(t, filepath.Join(t.TempDir(), "token.db"))
 	token, err := store.Token(context.Background())
 	if err != nil || token != "" {
 		t.Fatalf("token = %q, err = %v", token, err)
@@ -210,7 +210,7 @@ func TestTokenEmptyWhenUnset(t *testing.T) {
 
 func TestConcurrentAppendsGetUniqueSequentialIDs(t *testing.T) {
 	ctx := context.Background()
-	store := openTestStore(t, filepath.Join(t.TempDir(), "concurrent.db"), 10)
+	store := openTestStore(t, filepath.Join(t.TempDir(), "concurrent.db"))
 
 	created, err := store.Create(ctx, "", "alice", testVersion)
 	if err != nil {
