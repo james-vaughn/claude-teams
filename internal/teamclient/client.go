@@ -105,7 +105,7 @@ func (c *Client) do(ctx context.Context, method, path string, headers http.Heade
 	}
 	request.Header = headers.Clone()
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("ngrok-skip-browser-warning", "true")
+	request.Header.Set("User-Agent", "team-mcp/"+c.version)
 	request.Header.Set(team.VersionHeader, c.version)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")

@@ -33,7 +33,7 @@ To start over with no sessions, stop the server and delete the database files (`
 
 ## Add the MCP to an agent
 
-`team-mcp` reads the team server's base URL from the `TEAM_SERVER_URL` environment variable, for example the ngrok https URL. Every member of a session must point at the same server. If the variable is missing or isn't an http(s) URL, the tools return an error that says so.
+`team-mcp` reads the team server's base URL from the `TEAM_SERVER_URL` environment variable. Use whatever URL the server is reachable at, such as a reverse proxy, a tunnel or a host on your network. Every member of a session must point at the same server. If the variable is missing or isn't an http(s) URL, the tools return an error that says so.
 
 Claude Code:
 
@@ -46,10 +46,10 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.claude-teams]
 command = "/Users/you/Git/claude-teams/bin/team-mcp"
-env = { TEAM_SERVER_URL = "https://your-server.ngrok-free.app" }
+env = { TEAM_SERVER_URL = "https://your.url.com" }
 ```
 
-When the server URL changes, for example after restarting ngrok, update the variable and restart the agent.
+When the server URL changes, update the variable and restart the agent.
 
 ## Tools
 

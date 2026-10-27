@@ -43,7 +43,7 @@ type state struct {
 
 func newState(serverURL string) *state {
 	if strings.TrimSpace(serverURL) == "" {
-		return &state{clientErr: fmt.Errorf("set %s to the team server's base URL, e.g. the ngrok https URL, in this MCP server's config", serverURLEnv)}
+		return &state{clientErr: fmt.Errorf("set %s to the team server's base URL, e.g. https://team.example.com, in this MCP server's config", serverURLEnv)}
 	}
 	client, err := teamclient.New(serverURL, version)
 	if err != nil {
