@@ -3,8 +3,9 @@ package team
 import "time"
 
 const (
-	VersionHeader     = "X-Team-MCP-Version"
-	MemberTokenHeader = "X-Team-Member-Token"
+	VersionHeader      = "X-Team-MCP-Version"
+	SessionTokenHeader = "X-Team-Session-Token"
+	MemberTokenHeader  = "X-Team-Member-Token"
 )
 
 type Message struct {
@@ -45,6 +46,11 @@ type JoinResponse struct {
 	Session     SessionInfo `json:"session"`
 	JoinID      int64       `json:"joinMessageId"`
 	MemberToken string      `json:"memberToken"`
+}
+
+type CreateSessionResponse struct {
+	JoinResponse
+	SessionToken string `json:"sessionToken"`
 }
 
 type PublishRequest struct {

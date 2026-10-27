@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
@@ -32,22 +31,18 @@ var (
 
 type Handler struct {
 	store *Store
-	token string
 	mux   *http.ServeMux
 }
 
-func NewHandler(store *Store, token string) *Handler {
-	if token == "" {
-		panic("relay: token must not be empty")
-	}
-	h := &Handler{store: store, token: token, mux: http.NewServeMux()}
+func NewHandler(store *Store) *Handler {
+	h := &Handler{store: store, mux: http.NewServeMux()}
 	h.mux.HandleFunc("GET /healthz", h.health)
-	h.mux.HandleFunc("POST /sessions", h.requireClient(h.createSession))
-	h.mux.HandleFunc("GET /sessions/{session}", h.requireClient(h.sessionInfo))
-	h.mux.HandleFunc("DELETE /sessions/{session}", h.requireClient(h.stopSession))
-	h.mux.HandleFunc("POST /sessions/{session}/members", h.requireClient(h.join))
-	h.mux.HandleFunc("POST /sessions/{session}/messages", h.requireClient(h.publish))
-	h.mux.HandleFunc("GET /sessions/{session}/messages", h.requireClient(h.messages))
+	h.mux.HandleFunc("POST /sessions", requireVersion(h.createSession))
+	h.mux.HandleFunc("GET /sessions/{session}", requireVersion(h.sessionInfo))
+	h.mux.HandleFunc("DELETE /sessions/{session}", requireVersion(h.stopSession))
+	h.mux.HandleFunc("POST /sessions/{session}/members", requireVersion(h.join))
+	h.mux.HandleFunc("POST /sessions/{session}/messages", requireVersion(h.publish))
+	h.mux.HandleFunc("GET /sessions/{session}/messages", requireVersion(h.messages))
 	return h
 }
 
@@ -59,13 +54,8 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *Handler) requireClient(next http.HandlerFunc) http.HandlerFunc {
+func requireVersion(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.token)) != 1 {
-			writeError(w, http.StatusUnauthorized, "invalid or missing token")
-			return
-		}
 		if !validVersion(clientVersion(r)) {
 			writeError(w, http.StatusBadRequest, team.VersionHeader+" header must be the team-mcp version, like 0.1.0")
 			return
@@ -142,7 +132,7 @@ func (h *Handler) join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	joined, err := h.store.Join(r.Context(), sessionID, name, clientVersion(r), memberToken(r))
+	joined, err := h.store.Join(r.Context(), sessionID, sessionToken(r), name, clientVersion(r), memberToken(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -222,6 +212,10 @@ func sessionFromPath(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return sessionID, true
 }
 
+func sessionToken(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get(team.SessionTokenHeader))
+}
+
 func memberToken(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get(team.MemberTokenHeader))
 }
@@ -265,6 +259,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrSessionNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrBadSessionToken):
+		writeError(w, http.StatusUnauthorized, err.Error())
 	case errors.Is(err, ErrNotMember):
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrNameTaken):

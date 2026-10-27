@@ -19,22 +19,19 @@ import (
 
 var (
 	ErrSessionNotFound = errors.New("session not found or already stopped")
+	ErrBadSessionToken = errors.New("session token is missing or wrong; ask whoever started the session for it")
 	ErrNotMember       = errors.New("send the member token you got when you joined this session")
 	ErrNameTaken       = errors.New("another member already uses this name in the session; pick a different name")
 )
 
 const schema = `
-CREATE TABLE IF NOT EXISTS meta (
-	key   TEXT PRIMARY KEY,
-	value TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS sessions (
 	id         TEXT PRIMARY KEY,
 	name       TEXT NOT NULL,
 	created_by TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
-	latest_id  INTEGER NOT NULL DEFAULT 0
+	latest_id  INTEGER NOT NULL DEFAULT 0,
+	token_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -57,8 +54,6 @@ CREATE TABLE IF NOT EXISTS messages (
 	PRIMARY KEY (session_id, id)
 );
 `
-
-const tokenKey = "token"
 
 type Store struct {
 	db  *sql.DB
@@ -83,32 +78,37 @@ func OpenStore(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema in %s: %w", path, err)
 	}
-	if err := addMissingMemberColumns(ctx, db); err != nil {
+	if err := migrate(ctx, db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate schema in %s: %w", path, err)
 	}
 	return &Store{db: db, now: time.Now}, nil
 }
 
-func addMissingMemberColumns(ctx context.Context, db *sql.DB) error {
-	for _, column := range []string{"mcp_version", "secret_hash"} {
-		if err := addMemberTextColumn(ctx, db, column); err != nil {
+func migrate(ctx context.Context, db *sql.DB) error {
+	for _, column := range []struct{ table, name string }{
+		{"sessions", "token_hash"},
+		{"members", "mcp_version"},
+		{"members", "secret_hash"},
+	} {
+		if err := addTextColumn(ctx, db, column.table, column.name); err != nil {
 			return err
 		}
 	}
-	return nil
+	_, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS meta`)
+	return err
 }
 
-func addMemberTextColumn(ctx context.Context, db *sql.DB, column string) error {
+func addTextColumn(ctx context.Context, db *sql.DB, table, column string) error {
 	var present int
 	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pragma_table_info('members') WHERE name = ?`, column).Scan(&present); err != nil {
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&present); err != nil {
 		return err
 	}
 	if present > 0 {
 		return nil
 	}
-	_, err := db.ExecContext(ctx, `ALTER TABLE members ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
+	_, err := db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -116,39 +116,30 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) Token(ctx context.Context) (string, error) {
-	var token string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, tokenKey).Scan(&token)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return token, err
-}
-
-func (s *Store) SetToken(ctx context.Context, token string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
-		tokenKey, token)
-	return err
-}
-
-func (s *Store) Create(ctx context.Context, name, createdBy, mcpVersion string) (team.JoinResponse, error) {
+func (s *Store) Create(ctx context.Context, name, createdBy, mcpVersion string) (team.CreateSessionResponse, error) {
 	id, err := newUUID()
 	if err != nil {
-		return team.JoinResponse{}, err
+		return team.CreateSessionResponse{}, err
+	}
+	sessionToken, err := newSecret()
+	if err != nil {
+		return team.CreateSessionResponse{}, err
 	}
 
-	var response team.JoinResponse
+	var joined team.JoinResponse
 	err = s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO sessions (id, name, created_by, created_at) VALUES (?, ?, ?, ?)`,
-			id, name, createdBy, s.timestamp()); err != nil {
+			`INSERT INTO sessions (id, name, created_by, created_at, token_hash) VALUES (?, ?, ?, ?, ?)`,
+			id, name, createdBy, s.timestamp(), hashSecret(sessionToken)); err != nil {
 			return err
 		}
-		response, err = s.joinMember(ctx, tx, id, createdBy, mcpVersion, "")
+		joined, err = s.joinMember(ctx, tx, id, createdBy, mcpVersion, "")
 		return err
 	})
-	return response, err
+	if err != nil {
+		return team.CreateSessionResponse{}, err
+	}
+	return team.CreateSessionResponse{JoinResponse: joined, SessionToken: sessionToken}, nil
 }
 
 func (s *Store) Info(ctx context.Context, id, memberToken string) (team.SessionInfo, error) {
@@ -203,10 +194,10 @@ func (s *Store) truncateWAL(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Join(ctx context.Context, id, name, mcpVersion, presentedToken string) (team.JoinResponse, error) {
+func (s *Store) Join(ctx context.Context, id, sessionToken, name, mcpVersion, presentedToken string) (team.JoinResponse, error) {
 	var response team.JoinResponse
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		if err := requireSession(ctx, tx, id); err != nil {
+		if err := requireSessionToken(ctx, tx, id, sessionToken); err != nil {
 			return err
 		}
 		var err error
@@ -223,11 +214,11 @@ func (s *Store) joinMember(ctx context.Context, tx *sql.Tx, id, name, mcpVersion
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
 		return team.JoinResponse{}, err
-	case storedHash == "" || presentedToken == "" || hashMemberToken(presentedToken) != storedHash:
+	case storedHash == "" || presentedToken == "" || hashSecret(presentedToken) != storedHash:
 		return team.JoinResponse{}, ErrNameTaken
 	}
 
-	memberToken, err := newMemberToken()
+	memberToken, err := newSecret()
 	if err != nil {
 		return team.JoinResponse{}, err
 	}
@@ -235,7 +226,7 @@ func (s *Store) joinMember(ctx context.Context, tx *sql.Tx, id, name, mcpVersion
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO members (session_id, name, mcp_version, secret_hash, joined_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (session_id, name) DO UPDATE SET mcp_version = excluded.mcp_version, secret_hash = excluded.secret_hash, last_seen = excluded.last_seen`,
-		id, name, mcpVersion, hashMemberToken(memberToken), now, now); err != nil {
+		id, name, mcpVersion, hashSecret(memberToken), now, now); err != nil {
 		return team.JoinResponse{}, err
 	}
 	joined, err := appendMessage(ctx, tx, id, name, "join", name+" joined the session", now)
@@ -333,6 +324,21 @@ func fromTimestamp(nanos int64) time.Time {
 	return time.Unix(0, nanos).UTC()
 }
 
+func requireSessionToken(ctx context.Context, tx *sql.Tx, id, sessionToken string) error {
+	var storedHash string
+	err := tx.QueryRowContext(ctx, `SELECT token_hash FROM sessions WHERE id = ?`, id).Scan(&storedHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrSessionNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if storedHash == "" || sessionToken == "" || hashSecret(sessionToken) != storedHash {
+		return ErrBadSessionToken
+	}
+	return nil
+}
+
 func requireSession(ctx context.Context, tx *sql.Tx, id string) error {
 	var exists int
 	err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, id).Scan(&exists)
@@ -349,7 +355,7 @@ func (s *Store) authenticateMember(ctx context.Context, tx *sql.Tx, id, memberTo
 	var name string
 	err := tx.QueryRowContext(ctx,
 		`UPDATE members SET last_seen = ? WHERE session_id = ? AND secret_hash = ? RETURNING name`,
-		s.timestamp(), id, hashMemberToken(memberToken)).Scan(&name)
+		s.timestamp(), id, hashSecret(memberToken)).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotMember
 	}
@@ -420,7 +426,7 @@ func newUUID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
-func newMemberToken() (string, error) {
+func newSecret() (string, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
@@ -428,7 +434,7 @@ func newMemberToken() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-func hashMemberToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
+func hashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])
 }

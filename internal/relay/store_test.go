@@ -35,9 +35,6 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 	if _, err := first.Stop(ctx, stopped.Session.ID, stopped.MemberToken); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.SetToken(ctx, "persisted-token"); err != nil {
-		t.Fatal(err)
-	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -72,9 +69,8 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("stopped session after reopen: err = %v, want ErrSessionNotFound", err)
 	}
 
-	token, err := second.Token(ctx)
-	if err != nil || token != "persisted-token" {
-		t.Fatalf("token = %q, err = %v", token, err)
+	if _, err := second.Join(ctx, sessionID, created.SessionToken, "bob", testVersion, ""); err != nil {
+		t.Fatalf("session token after reopen: %v", err)
 	}
 }
 
@@ -86,7 +82,7 @@ func TestStopDeletesMembersAndMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Join(ctx, created.Session.ID, "bob", testVersion, ""); err != nil {
+	if _, err := store.Join(ctx, created.Session.ID, created.SessionToken, "bob", testVersion, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Stop(ctx, created.Session.ID, created.MemberToken); err != nil {
@@ -132,7 +128,7 @@ func TestStopLeavesNoSessionDataOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	forbidden := []string{canary, stopped.Session.ID, memberName, "canary-session-name", hashMemberToken(stopped.MemberToken)}
+	forbidden := []string{canary, stopped.Session.ID, memberName, "canary-session-name", hashSecret(stopped.SessionToken), hashSecret(stopped.MemberToken)}
 	assertNotOnDisk := func(when string) {
 		t.Helper()
 		for _, file := range []string{path, path + "-wal"} {
@@ -163,7 +159,7 @@ func TestStopLeavesNoSessionDataOnDisk(t *testing.T) {
 	}
 }
 
-func TestOpenStoreAddsMemberColumnsToOldDatabase(t *testing.T) {
+func TestOpenStoreMigratesOldDatabase(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "old.db")
 
@@ -172,8 +168,10 @@ func TestOpenStoreAddsMemberColumnsToOldDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := old.ExecContext(ctx, `
+		CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, latest_id INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE members (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, name TEXT NOT NULL, joined_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (session_id, name));
+		INSERT INTO meta (key, value) VALUES ('token', 'old-server-token');
 		INSERT INTO sessions (id, name, created_by, created_at) VALUES ('s1', 'old', 'alice', 0);
 		INSERT INTO members (session_id, name, joined_at, last_seen) VALUES ('s1', 'alice', 0, 0);
 	`); err != nil {
@@ -184,27 +182,27 @@ func TestOpenStoreAddsMemberColumnsToOldDatabase(t *testing.T) {
 	}
 
 	store := openTestStore(t, path)
-	if _, err := store.Join(ctx, "s1", "alice", testVersion, ""); !errors.Is(err, ErrNameTaken) {
-		t.Fatalf("claiming a member that has no secret: err = %v, want ErrNameTaken", err)
+
+	var metaTables int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = 'meta'`).Scan(&metaTables); err != nil {
+		t.Fatal(err)
 	}
-	joined, err := store.Join(ctx, "s1", "bob", testVersion, "")
+	if metaTables != 0 {
+		t.Fatal("meta table with the old server token was not dropped")
+	}
+
+	for _, sessionToken := range []string{"", "old-server-token"} {
+		if _, err := store.Join(ctx, "s1", sessionToken, "bob", testVersion, ""); !errors.Is(err, ErrBadSessionToken) {
+			t.Fatalf("joining a session that has no token with %q: err = %v, want ErrBadSessionToken", sessionToken, err)
+		}
+	}
+
+	created, err := store.Create(ctx, "new", "carol", testVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	members := joined.Session.Members
-	if len(members) != 2 || members[0].Name != "alice" || members[0].MCPVersion != "" || members[1].Name != "bob" || members[1].MCPVersion != testVersion {
-		t.Fatalf("unexpected members after migration: %+v", members)
-	}
-	if _, err := store.Info(ctx, "s1", joined.MemberToken); err != nil {
+	if _, err := store.Join(ctx, created.Session.ID, created.SessionToken, "dave", testVersion, ""); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestTokenEmptyWhenUnset(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "token.db"))
-	token, err := store.Token(context.Background())
-	if err != nil || token != "" {
-		t.Fatalf("token = %q, err = %v", token, err)
 	}
 }
 
